@@ -27,7 +27,7 @@
       "id": 3,
       "eval_name": "dependent-waves",
       "prompt": "delegate: first inventory every 'never' rule across the three brand guides in delegate/evals/fixtures/brands/ (aurora, beacon, cirrus), THEN write one cross-brand 'shared floor' summary paragraph that only uses rules appearing in all three. Current model orchestrates.",
-      "expected_output": "Plan shows wave 1 (parallel per-brand extraction, cheap tier) and wave 2 (synthesis) explicitly dependent on wave 1's output — synthesis must not start or be delegated before extractions return. The final paragraph contains only the two rules common to all three guides (no uncitable performance/safety claims; no ALL-CAPS emphasis) and excludes brand-specific rules.",
+      "expected_output": "Plan shows wave 1 (parallel per-brand extraction, cheap tier) and wave 2 (synthesis) explicitly dependent on wave 1's output — synthesis must not start or be delegated before extractions return. The final paragraph contains only the two rules common to all three guides (no uncitable performance/safety claims; no ALL-CAPS emphasis) and excludes brand-specific rules. TRAP: 'Never promise a delivery date we do not control' appears in aurora and beacon but NOT cirrus — including it means the run did not actually read all three guides.",
       "files": []
     },
     {

@@ -14,6 +14,7 @@ not a hype machine.
 
 - Never make performance or safety claims we cannot cite.
 - Never use ALL-CAPS for emphasis.
+- Never promise a delivery date we do not control.
 - Never use exclamation points in headlines.
 - Never describe a product as "unbreakable" or "lifetime".
 

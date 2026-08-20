@@ -20,7 +20,23 @@ jobs:
       - name: Validate skill and eval suite
         run: python3 scripts/validate_skill.py
 
+      - name: Validate against upload rules
+        run: python3 scripts/validate_skill.py --for-upload
+
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
+
       - name: Check installer is executable and syntactically valid
         run: |
           test -x install.sh || { echo "install.sh is not executable"; exit 1; }
           bash -n install.sh
+
+      # The archive is byte-reproducible, so rebuilding must be a no-op.
+      # A diff here means the committed .skill is stale relative to SKILL.md.
+      - name: Check committed .skill artifact is up to date
+        run: |
+          python3 scripts/package_skill.py --quiet
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/delegate.skill is stale — run 'python3 scripts/package_skill.py' and commit the result"
+            exit 1
+          fi

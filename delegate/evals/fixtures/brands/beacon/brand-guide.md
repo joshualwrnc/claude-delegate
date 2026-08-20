@@ -14,6 +14,7 @@ unintimidating to someone buying their first set.
 
 - Never make performance or safety claims we cannot cite.
 - Never use ALL-CAPS for emphasis.
+- Never promise a delivery date we do not control.
 - Never imply the customer is doing it wrong.
 - Never stack more than two adjectives on a product name.
 
