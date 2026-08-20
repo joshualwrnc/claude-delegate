@@ -22,6 +22,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -217,6 +218,20 @@ class TestFrontmatter(TempRepoTest):
         skill = write_skill(self.tmp, frontmatter=frontmatter)
         self.assertErrorMatching(self.run_validate(skill), "nested/multi-line frontmatter")
 
+    def test_missing_skill_md(self) -> None:
+        skill_dir = self.tmp / "delegate"
+        skill_dir.mkdir()
+        self.assertErrorMatching(self.run_validate(skill_dir), "SKILL.md: missing")
+
+    def test_blank_lines_in_frontmatter_are_ignored(self) -> None:
+        skill = write_skill(self.tmp, frontmatter=f"name: delegate\n\ndescription: {GOOD_DESC}")
+        self.assertTrue(self.run_validate(skill).ok)
+
+    def test_line_without_colon_is_rejected(self) -> None:
+        frontmatter = f"name: delegate\ndescription: {GOOD_DESC}\nbogus"
+        skill = write_skill(self.tmp, frontmatter=frontmatter)
+        self.assertErrorMatching(self.run_validate(skill), "expected 'key: value'")
+
     def test_duplicate_key(self) -> None:
         frontmatter = f"name: delegate\ndescription: {GOOD_DESC}\nname: delegate"
         skill = write_skill(self.tmp, frontmatter=frontmatter)
@@ -396,6 +411,11 @@ class TestEvals(TempRepoTest):
         write_evals(skill, payload)
         self.assertTrue(self.run_validate(skill).ok)
 
+    def test_non_object_eval_case_is_rejected(self) -> None:
+        skill = write_skill(self.tmp)
+        write_evals(skill, {"skill_name": "delegate", "evals": ["just a string"]})
+        self.assertErrorMatching(self.run_validate(skill), "expected an object")
+
     def test_files_must_be_a_list(self) -> None:
         skill = write_skill(self.tmp)
         payload = minimal_evals()
@@ -439,6 +459,11 @@ class TestLeakScan(TempRepoTest):
         dist = self.tmp / "dist"
         dist.mkdir()
         (dist / "notes.md").write_text("/home/someone/x", encoding="utf-8")
+        self.assertTrue(self._scan().ok)
+
+    def test_ignores_undecodable_text_file(self) -> None:
+        """A .md that is not valid UTF-8 is skipped, not a crash."""
+        (self.tmp / "notes.md").write_bytes(b"\xff\xfe/home/someone/secret")
         self.assertTrue(self._scan().ok)
 
     def test_clean_tree_passes(self) -> None:
@@ -537,6 +562,186 @@ class TestPackager(TempRepoTest):
             zf.writestr("SKILL.md", "---\nname: delegate\n---\n# x\n")
         with self.assertRaises(ValueError):
             package_skill.verify(archive, "delegate")
+
+
+class TestExclusionRules(unittest.TestCase):
+    """should_exclude() works on arcnames rooted at the skill folder name."""
+
+    def test_skill_md_is_kept(self) -> None:
+        self.assertFalse(package_skill.should_exclude(Path("delegate/SKILL.md")))
+
+    def test_root_evals_are_excluded(self) -> None:
+        self.assertTrue(package_skill.should_exclude(Path("delegate/evals/evals.json")))
+
+    def test_nested_evals_directory_is_kept(self) -> None:
+        """Only evals at the skill root is a development aid."""
+        self.assertFalse(
+            package_skill.should_exclude(Path("delegate/references/evals/notes.md"))
+        )
+
+    def test_pycache_is_excluded_at_any_depth(self) -> None:
+        self.assertTrue(
+            package_skill.should_exclude(Path("delegate/references/__pycache__/x.py"))
+        )
+
+    def test_glob_and_name_exclusions(self) -> None:
+        self.assertTrue(package_skill.should_exclude(Path("delegate/x.pyc")))
+        self.assertTrue(package_skill.should_exclude(Path("delegate/.DS_Store")))
+
+
+class TestPackagerVerify(TempRepoTest):
+    def write_archive(self, *entries: tuple[str, str]) -> Path:
+        archive = self.tmp / "candidate.skill"
+        with zipfile.ZipFile(archive, "w") as zf:
+            for name, content in entries:
+                zf.writestr(name, content)
+        return archive
+
+    def test_accepts_a_well_formed_archive(self) -> None:
+        archive = self.write_archive(
+            ("delegate/SKILL.md", "---\nname: delegate\n---\n# x\n"),
+            ("delegate/references/notes.md", "hi"),
+        )
+        package_skill.verify(archive, "delegate")  # must not raise
+
+    def test_rejects_missing_skill_md(self) -> None:
+        archive = self.write_archive(("delegate/references/notes.md", "hi"))
+        with self.assertRaisesRegex(ValueError, "missing delegate/SKILL.md"):
+            package_skill.verify(archive, "delegate")
+
+    def test_rejects_packaged_evals(self) -> None:
+        archive = self.write_archive(
+            ("delegate/SKILL.md", "---\nname: delegate\n---\n# x\n"),
+            ("delegate/evals/evals.json", "{}"),
+        )
+        with self.assertRaisesRegex(ValueError, "evals must not be packaged"):
+            package_skill.verify(archive, "delegate")
+
+    def test_rejects_corrupt_entry(self) -> None:
+        archive = self.write_archive(("delegate/SKILL.md", "---\nname: delegate\n---\n# x\n"))
+        # Flip the last byte of the compressed payload so the CRC no longer
+        # matches and testzip() reports the entry.
+        data = bytearray(archive.read_bytes())
+        offset = data.rindex(b"# x")
+        data[offset] = data[offset] ^ 0xFF
+        archive.write_bytes(bytes(data))
+        with self.assertRaisesRegex(ValueError, "corrupt entry"):
+            package_skill.verify(archive, "delegate")
+
+
+class TestPackagerOutput(TempRepoTest):
+    def test_non_quiet_run_lists_added_and_skipped_entries(self) -> None:
+        skill = write_skill(self.tmp, dirname="delegate")
+        (skill / ".DS_Store").write_text("junk", encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            package_skill.package(skill, self.tmp / "out")
+        printed = out.getvalue()
+        self.assertIn("added:   delegate/SKILL.md", printed)
+        self.assertIn("skipped: delegate/.DS_Store", printed)
+
+
+class CliTest(TempRepoTest):
+    """Runs a module's main() against a throwaway repo root."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Both modules resolve arguments against validate_skill.REPO_ROOT, and
+        # the validator uses it for relative labels and the leak scan.
+        for module in (validate_skill, package_skill):
+            patcher = mock.patch.object(module, "REPO_ROOT", self.tmp)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def copy_real_skill(self) -> Path:
+        target = self.tmp / "delegate"
+        shutil.copytree(REPO_ROOT / "delegate", target)
+        return target
+
+    def run_main(self, main, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+
+class TestValidatorCli(CliTest):
+    def test_valid_skill_exits_zero(self) -> None:
+        self.copy_real_skill()
+        code, out, _ = self.run_main(validate_skill.main, [])
+        self.assertEqual(0, code, out)
+        self.assertIn("OK — delegate validated (local rules)", out)
+
+    def test_for_upload_flag_is_reported_in_the_summary(self) -> None:
+        self.copy_real_skill()
+        code, out, _ = self.run_main(validate_skill.main, ["--for-upload"])
+        self.assertEqual(0, code, out)
+        self.assertIn("upload rules", out)
+
+    def test_explicit_skill_argument(self) -> None:
+        write_skill(self.tmp, name="other", dirname="other")
+        code, out, _ = self.run_main(validate_skill.main, ["other"])
+        self.assertEqual(0, code, out)
+        self.assertIn("OK — other validated", out)
+
+    def test_invalid_skill_exits_one_and_reports_to_stderr(self) -> None:
+        write_skill(self.tmp, frontmatter="name: delegate")  # no description
+        code, _, err = self.run_main(validate_skill.main, [])
+        self.assertEqual(1, code)
+        self.assertIn("missing required key 'description'", err)
+        self.assertIn("error(s)", err)
+
+    def test_warnings_do_not_fail_the_run(self) -> None:
+        write_skill(self.tmp, body="prose without a heading\n")
+        code, out, _ = self.run_main(validate_skill.main, [])
+        self.assertEqual(0, code, out)
+        self.assertIn("warning:", out)
+        self.assertIn("no top-level", out)
+
+    def test_missing_directory_exits_two(self) -> None:
+        code, _, err = self.run_main(validate_skill.main, ["nope"])
+        self.assertEqual(2, code)
+        self.assertIn("is not a directory", err)
+
+
+class TestPackagerCli(CliTest):
+    def test_packages_into_dist_by_default(self) -> None:
+        self.copy_real_skill()
+        code, out, _ = self.run_main(package_skill.main, ["--quiet"])
+        self.assertEqual(0, code, out)
+        self.assertTrue((self.tmp / "dist" / "delegate.skill").is_file())
+        self.assertIn("packaged dist/delegate.skill", out)
+
+    def test_quiet_suppresses_per_entry_output(self) -> None:
+        self.copy_real_skill()
+        _, quiet_out, _ = self.run_main(package_skill.main, ["--quiet"])
+        self.assertNotIn("added:", quiet_out)
+        _, loud_out, _ = self.run_main(package_skill.main, [])
+        self.assertIn("added:", loud_out)
+
+    def test_custom_out_dir(self) -> None:
+        self.copy_real_skill()
+        code, out, _ = self.run_main(package_skill.main, ["delegate", "--out-dir", "build"])
+        self.assertEqual(0, code, out)
+        self.assertTrue((self.tmp / "build" / "delegate.skill").is_file())
+
+    def test_invalid_skill_exits_one(self) -> None:
+        write_skill(self.tmp, frontmatter="name: delegate")  # no description
+        code, _, err = self.run_main(package_skill.main, ["--quiet"])
+        self.assertEqual(1, code)
+        self.assertIn("validation failed", err)
+        self.assertFalse((self.tmp / "dist").exists())
+
+    def test_directory_without_skill_md_exits_one(self) -> None:
+        (self.tmp / "delegate").mkdir()
+        code, _, err = self.run_main(package_skill.main, ["--quiet"])
+        self.assertEqual(1, code)
+        self.assertIn("SKILL.md not found", err)
+
+    def test_missing_directory_exits_two(self) -> None:
+        code, _, err = self.run_main(package_skill.main, ["nope"])
+        self.assertEqual(2, code)
+        self.assertIn("is not a directory", err)
 
 
 class TestInstaller(TempRepoTest):
