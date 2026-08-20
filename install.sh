@@ -86,9 +86,20 @@ if [[ -e "$dest" && $force -eq 0 ]]; then
 fi
 
 mkdir -p "$(dirname "$dest")"
+
+# Stage the new copy next to dest and swap it in last. Copying straight into
+# dest means a failed cp (out of space, unreadable source) leaves the previous
+# install already deleted and an empty skill directory for Claude Code to load.
+# Dot-prefixed so a skill loader scanning the directory mid-install ignores it.
+staging="$(dirname "$dest")/.${SKILL_NAME}.tmp.$$"
+cleanup() { rm -rf "$staging"; }
+trap cleanup EXIT
+
+rm -rf "$staging"
+mkdir -p "$staging"
+cp "${SRC}/SKILL.md" "${staging}/SKILL.md"
 rm -rf "$dest"
-mkdir -p "$dest"
-cp "${SRC}/SKILL.md" "${dest}/SKILL.md"
+mv "$staging" "$dest"
 
 echo "installed ${SKILL_NAME} (${scope}) → ${dest}"
 echo "Claude Code picks it up without a restart; run /delegate to invoke it."

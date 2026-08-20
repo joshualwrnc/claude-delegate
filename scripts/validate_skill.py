@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -113,6 +114,38 @@ class Report:
             print(f"error: {message}", file=stream_err)
 
 
+def read_text(path: Path, label: str, report: Report) -> str | None:
+    """Read a UTF-8 text file, reporting failure instead of raising.
+
+    A file the validator cannot read is a finding, not a crash: the caller
+    still gets a rendered report and the run still fails.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        report.error(f"{label}: not valid UTF-8 — {exc}")
+    except OSError as exc:
+        report.error(f"{label}: cannot be read — {exc}")
+    return None
+
+
+def walk_files(root: Path, report: Report) -> list[Path]:
+    """List files under root. Unwalkable directories are errors, not gaps.
+
+    Path.rglob swallows permission errors, so a directory the validator cannot
+    read would make every check over it pass by simply not seeing the files.
+    """
+    found: list[Path] = []
+
+    def on_error(exc: OSError) -> None:
+        report.error(f"{exc.filename or root}: cannot be scanned — {exc}")
+
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=on_error):
+        for filename in filenames:
+            found.append(Path(dirpath) / filename)
+    return found
+
+
 def parse_frontmatter(text: str, source: str, report: Report) -> tuple[dict[str, str], str]:
     """Parse the leading `---` block as flat `key: value` pairs.
 
@@ -177,8 +210,8 @@ def check_skill(skill_dir: Path, report: Report, *, for_upload: bool) -> None:
     # would happily load nested ones, so this only bites at distribution time.
     packaged = [
         path
-        for path in skill_dir.rglob("SKILL.md")
-        if is_packaged(path.relative_to(skill_dir))
+        for path in walk_files(skill_dir, report)
+        if path.name == "SKILL.md" and is_packaged(path.relative_to(skill_dir))
     ]
     if len(packaged) > 1:
         extras = sorted(
@@ -189,7 +222,11 @@ def check_skill(skill_dir: Path, report: Report, *, for_upload: bool) -> None:
             f"contain exactly one at <folder>/SKILL.md — extra: {', '.join(extras)}"
         )
 
-    meta, body = parse_frontmatter(skill_md.read_text(encoding="utf-8"), str(rel), report)
+    text = read_text(skill_md, str(rel), report)
+    if text is None:
+        return
+
+    meta, body = parse_frontmatter(text, str(rel), report)
 
     name = meta.get("name")
     if not name:
@@ -263,8 +300,12 @@ def check_evals(skill_dir: Path, report: Report, repo_root: Path) -> None:
         report.warn(f"{rel}: no eval suite found")
         return
 
+    text = read_text(evals_path, str(rel), report)
+    if text is None:
+        return
+
     try:
-        data = json.loads(evals_path.read_text(encoding="utf-8"))
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         report.error(f"{rel}: invalid JSON — {exc}")
         return
@@ -316,14 +357,15 @@ def check_evals(skill_dir: Path, report: Report, repo_root: Path) -> None:
 
 
 def check_no_leaked_paths(report: Report, repo_root: Path) -> None:
-    for path in sorted(repo_root.rglob("*")):
-        if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
+    for path in sorted(walk_files(repo_root, report)):
+        if path.suffix not in TEXT_SUFFIXES:
             continue
         if any(part in {".git", "dist", "__pycache__"} for part in path.parts):
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        # A file that cannot be read is reported rather than skipped: silently
+        # passing over it would let a leak through unexamined.
+        text = read_text(path, str(path.relative_to(repo_root)), report)
+        if text is None:
             continue
         if LEAK_EXEMPT_TOKEN in text:
             continue

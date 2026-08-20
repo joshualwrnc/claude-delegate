@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
 
@@ -464,6 +465,47 @@ class TestLeakScan(TempRepoTest):
         self.assertNotIn(validate_skill.LEAK_EXEMPT_TOKEN, source)
 
 
+class TestUnreadableInputs(TempRepoTest):
+    """Files and directories the validator cannot read are findings, not gaps."""
+
+    def test_unreadable_skill_md_is_reported_not_raised(self) -> None:
+        skill = write_skill(self.tmp)
+        (skill / "SKILL.md").chmod(0o000)
+        self.addCleanup((skill / "SKILL.md").chmod, 0o644)
+        if os.access(skill / "SKILL.md", os.R_OK):
+            self.skipTest("running as root: permissions do not restrict reads")
+        self.assertErrorMatching(self.run_validate(skill), "cannot be read")
+
+    def test_non_utf8_skill_md_is_reported_not_raised(self) -> None:
+        skill_dir = self.tmp / "delegate"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_bytes(b"---\nname: delegate\n---\n\n# \xff\xfe\n")
+        self.assertErrorMatching(self.run_validate(skill_dir), "not valid UTF-8")
+
+    def test_unreadable_file_is_reported_by_leak_scan(self) -> None:
+        notes = self.tmp / "notes.md"
+        notes.write_text("clean", encoding="utf-8")
+        notes.chmod(0o000)
+        self.addCleanup(notes.chmod, 0o644)
+        if os.access(notes, os.R_OK):
+            self.skipTest("running as root: permissions do not restrict reads")
+        report = validate_skill.Report()
+        validate_skill.check_no_leaked_paths(report, self.tmp)
+        self.assertErrorMatching(report, "cannot be read")
+
+    def test_unwalkable_directory_is_reported_by_leak_scan(self) -> None:
+        blocked = self.tmp / "blocked"
+        blocked.mkdir()
+        (blocked / "notes.md").write_text("see /home/someone/x.md", encoding="utf-8")
+        blocked.chmod(0o000)
+        self.addCleanup(blocked.chmod, 0o755)
+        if os.access(blocked, os.R_OK | os.X_OK):
+            self.skipTest("running as root: permissions do not restrict reads")
+        report = validate_skill.Report()
+        validate_skill.check_no_leaked_paths(report, self.tmp)
+        self.assertErrorMatching(report, "cannot be scanned")
+
+
 class TestPackager(TempRepoTest):
     def package_real(self) -> Path:
         out = self.tmp / "dist"
@@ -530,6 +572,30 @@ class TestPackager(TempRepoTest):
             zf.writestr("delegate/nested/SKILL.md", "---\nname: nested\n---\n# y\n")
         with self.assertRaises(ValueError):
             package_skill.verify(archive, "delegate")
+
+    def test_failed_validation_leaves_previous_artifact_untouched(self) -> None:
+        """A failing run must not replace or half-write a good .skill."""
+        out = self.tmp / "dist"
+        good = package_skill.package(REPO_ROOT / "delegate", out, quiet=True)
+        before = good.read_bytes()
+
+        broken = write_skill(self.tmp / "broken", frontmatter="name: delegate")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(ValueError):
+                package_skill.package(broken, out, quiet=True)
+
+        self.assertEqual(before, good.read_bytes())
+        self.assertEqual(["delegate.skill"], sorted(p.name for p in out.iterdir()))
+
+    def test_failed_verify_leaves_no_staged_artifact(self) -> None:
+        out = self.tmp / "dist"
+        skill = write_skill(self.tmp, dirname="delegate")
+        with unittest.mock.patch.object(
+            package_skill, "verify", side_effect=ValueError("boom")
+        ):
+            with self.assertRaises(ValueError):
+                package_skill.package(skill, out, quiet=True)
+        self.assertEqual([], sorted(p.name for p in out.iterdir()))
 
     def test_verify_rejects_wrong_root(self) -> None:
         archive = self.tmp / "bad.skill"
@@ -672,6 +738,40 @@ class TestInstaller(TempRepoTest):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertTrue(self.installed_path(home).is_file())
+
+    def test_failed_copy_keeps_the_existing_install(self) -> None:
+        """A copy that fails must not leave the previous install deleted."""
+        home = self.tmp / "home"
+        self.assertEqual(0, self.run_installer(home=home).returncode)
+        installed = self.installed_path(home)
+        original = installed.read_text(encoding="utf-8")
+
+        # A clone of the repo whose SKILL.md cannot be read, so cp fails after
+        # the installer has committed to overwriting.
+        clone = self.tmp / "clone"
+        (clone / "delegate").mkdir(parents=True)
+        shutil.copy(self.SCRIPT, clone / "install.sh")
+        source = clone / "delegate" / "SKILL.md"
+        source.write_text("---\nname: delegate\n---\n# other\n", encoding="utf-8")
+        source.chmod(0o000)
+        self.addCleanup(source.chmod, 0o644)
+        if os.access(source, os.R_OK):
+            self.skipTest("running as root: permissions do not restrict reads")
+
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        result = subprocess.run(
+            [str(clone / "install.sh"), "--force"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(self.tmp),
+        )
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertEqual(original, installed.read_text(encoding="utf-8"))
+        self.assertEqual(
+            ["delegate"], sorted(p.name for p in (home / ".claude" / "skills").iterdir())
+        )
 
     def test_installed_skill_matches_repo_copy(self) -> None:
         home = self.tmp / "home"
