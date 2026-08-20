@@ -3,6 +3,24 @@
 All notable changes to this skill are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+Security review of the repo scaffolding. No change to skill behavior;
+`SKILL.md` and `dist/delegate.skill` are byte-identical to 0.2.1.
+
+### Security
+
+- **CI ran with whatever `GITHUB_TOKEN` scope the repo defaults to.** The
+  workflow now declares `permissions: contents: read`; nothing in it writes to
+  the repo.
+- **CI actions were referenced by mutable tags** (`actions/checkout@v4`), so an
+  upstream retag could change what executes. Pinned to commit SHAs with the
+  version in a trailing comment.
+- **The packager followed symlinks under the skill root**, embedding the
+  target's bytes into a `.skill` meant to be shared or uploaded — a quiet way
+  to ship a host file to whoever installs the skill. It now refuses to package
+  a symlink instead of silently dropping it.
+
 ## [0.2.1] — 2026-08-20
 
 Fixes from a scaffolding review. No change to skill behavior; `SKILL.md` and

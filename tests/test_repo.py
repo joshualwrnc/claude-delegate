@@ -510,6 +510,26 @@ class TestPackager(TempRepoTest):
             names = zf.namelist()
         self.assertEqual(["delegate/SKILL.md"], names)
 
+    def test_symlink_is_refused_and_not_embedded(self) -> None:
+        skill = write_skill(self.tmp, dirname="delegate")
+        secret = self.tmp / "outside.txt"
+        secret.write_text("private", encoding="utf-8")
+        (skill / "reference.md").symlink_to(secret)
+        with self.assertRaises(ValueError) as ctx:
+            package_skill.package(skill, self.tmp / "out", quiet=True)
+        self.assertIn("symlink", str(ctx.exception))
+
+    def test_symlink_inside_excluded_dir_is_ignored(self) -> None:
+        skill = write_skill(self.tmp, dirname="delegate")
+        secret = self.tmp / "outside.txt"
+        secret.write_text("private", encoding="utf-8")
+        evals = skill / "evals"
+        evals.mkdir()
+        (evals / "reference.md").symlink_to(secret)
+        archive = package_skill.package(skill, self.tmp / "out", quiet=True)
+        with zipfile.ZipFile(archive) as zf:
+            self.assertEqual(["delegate/SKILL.md"], zf.namelist())
+
     def test_packaging_fails_on_invalid_skill(self) -> None:
         skill = write_skill(self.tmp, frontmatter="name: delegate")  # no description
         # package() renders the failing report; keep it out of the test log.
