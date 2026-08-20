@@ -27,13 +27,21 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from skill_common import (  # noqa: E402
+    REPO_ROOT,
+    SKILL_FILENAME,
+    build_parser,
+    is_packaged,
+    rel_to_repo,
+    resolve_skill_dir,
+)
 
 MAX_DESCRIPTION = 1024
 MAX_COMPATIBILITY = 500
@@ -53,12 +61,6 @@ UPLOAD_ALLOWED_KEYS = {
 # Additionally understood by Claude Code when loading from the filesystem, but
 # rejected on upload — so these are fine locally and fatal with --for-upload.
 LOCAL_ONLY_KEYS = {"disable-model-invocation"}
-
-# Directories whose contents are not packaged into a .skill. `evals` is
-# excluded only at the skill root; the others at any depth. Mirrors
-# Anthropic's packager so our SKILL.md count matches what upload sees.
-EXCLUDED_DIR_PARTS = {"__pycache__", "node_modules"}
-ROOT_EXCLUDED_DIR_PARTS = {"evals"}
 
 # Repo-relative path references inside eval prompts. The leading lookbehind
 # stops a match mid-path or mid-URL: without it, "github.com/user/claude-delegate/
@@ -153,22 +155,9 @@ def parse_frontmatter(text: str, source: str, report: Report) -> tuple[dict[str,
     return meta, "\n".join(lines[close + 1 :])
 
 
-def is_packaged(rel_path: Path) -> bool:
-    """True if rel_path (relative to the skill root) ends up in a .skill."""
-    dir_parts = rel_path.parts[:-1]
-    if any(part in EXCLUDED_DIR_PARTS for part in dir_parts):
-        return False
-    if dir_parts and dir_parts[0] in ROOT_EXCLUDED_DIR_PARTS:
-        return False
-    return True
-
-
 def check_skill(skill_dir: Path, report: Report, *, for_upload: bool) -> None:
-    skill_md = skill_dir / "SKILL.md"
-    try:
-        rel = skill_md.relative_to(REPO_ROOT)
-    except ValueError:
-        rel = skill_md
+    skill_md = skill_dir / SKILL_FILENAME
+    rel = rel_to_repo(skill_md)
     if not skill_md.is_file():
         report.error(f"{rel}: missing")
         return
@@ -177,7 +166,7 @@ def check_skill(skill_dir: Path, report: Report, *, for_upload: bool) -> None:
     # would happily load nested ones, so this only bites at distribution time.
     packaged = [
         path
-        for path in skill_dir.rglob("SKILL.md")
+        for path in skill_dir.rglob(SKILL_FILENAME)
         if is_packaged(path.relative_to(skill_dir))
     ]
     if len(packaged) > 1:
@@ -185,8 +174,8 @@ def check_skill(skill_dir: Path, report: Report, *, for_upload: bool) -> None:
             str(p.relative_to(skill_dir)) for p in packaged if p.resolve() != skill_md.resolve()
         )
         report.error(
-            f"{rel}: found {len(packaged)} packaged SKILL.md files, but a skill must "
-            f"contain exactly one at <folder>/SKILL.md — extra: {', '.join(extras)}"
+            f"{rel}: found {len(packaged)} packaged {SKILL_FILENAME} files, but a skill must "
+            f"contain exactly one at <folder>/{SKILL_FILENAME} — extra: {', '.join(extras)}"
         )
 
     meta, body = parse_frontmatter(skill_md.read_text(encoding="utf-8"), str(rel), report)
@@ -255,10 +244,7 @@ def check_referenced_paths(text: str, label: str, report: Report, repo_root: Pat
 
 def check_evals(skill_dir: Path, report: Report, repo_root: Path) -> None:
     evals_path = skill_dir / "evals" / "evals.json"
-    try:
-        rel = evals_path.relative_to(REPO_ROOT)
-    except ValueError:
-        rel = evals_path
+    rel = rel_to_repo(evals_path)
     if not evals_path.is_file():
         report.warn(f"{rel}: no eval suite found")
         return
@@ -352,8 +338,7 @@ def validate(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("skill", nargs="?", default="delegate", help="skill directory")
+    parser = build_parser(__doc__)
     parser.add_argument(
         "--for-upload",
         action="store_true",
@@ -361,9 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    skill_dir = (REPO_ROOT / args.skill).resolve()
-    if not skill_dir.is_dir():
-        print(f"error: {skill_dir} is not a directory", file=sys.stderr)
+    skill_dir = resolve_skill_dir(args.skill)
+    if skill_dir is None:
         return 2
 
     report = validate(skill_dir, for_upload=args.for_upload)

@@ -27,8 +27,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import package_skill  # noqa: E402
+import skill_common  # noqa: E402
 import validate_skill  # noqa: E402
 from validate_skill import validate  # noqa: E402
+
+REAL_SKILL = REPO_ROOT / "delegate"
 
 GOOD_DESC = "Does a thing. Use when the user asks for the thing."
 GOOD_BODY = "# Delegate\n\nSome instructions.\n"
@@ -78,6 +81,13 @@ class TempRepoTest(unittest.TestCase):
         kwargs.setdefault("scan_repo", False)
         return validate(skill_dir, **kwargs)
 
+    def write_fixture(self, relative: str, text: str = "hi") -> Path:
+        """Create a file under the temp repo root, parents included."""
+        path = self.tmp / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
     def assertErrorMatching(self, report, needle: str) -> None:
         joined = "\n".join(report.errors)
         self.assertIn(
@@ -89,20 +99,20 @@ class TestRealRepo(TempRepoTest):
     """The shipped skill must pass under both rule sets."""
 
     def test_real_skill_passes_local_rules(self) -> None:
-        report = validate(REPO_ROOT / "delegate")
+        report = validate(REAL_SKILL)
         self.assertTrue(report.ok, f"unexpected errors: {report.errors}")
 
     def test_real_skill_passes_upload_rules(self) -> None:
-        report = validate(REPO_ROOT / "delegate", for_upload=True)
+        report = validate(REAL_SKILL, for_upload=True)
         self.assertTrue(report.ok, f"unexpected errors: {report.errors}")
 
     def test_real_skill_has_no_warnings(self) -> None:
-        report = validate(REPO_ROOT / "delegate")
+        report = validate(REAL_SKILL)
         self.assertEqual([], report.warnings)
 
     def test_fixture_shared_never_rules_are_exactly_two(self) -> None:
         """Eval case 3's ground truth. If this drifts, the eval is wrong."""
-        brands = REPO_ROOT / "delegate/evals/fixtures/brands"
+        brands = REAL_SKILL / "evals" / "fixtures" / "brands"
         rule_sets = []
         for guide in sorted(brands.glob("*/brand-guide.md")):
             rules = set()
@@ -141,8 +151,8 @@ class TestRealRepo(TempRepoTest):
         self.assertIn("boom", err.getvalue())
 
     def test_report_state_does_not_leak_between_runs(self) -> None:
-        first = validate(REPO_ROOT / "delegate")
-        second = validate(REPO_ROOT / "delegate")
+        first = validate(REAL_SKILL)
+        second = validate(REAL_SKILL)
         self.assertEqual(first.errors, second.errors)
         self.assertTrue(second.ok)
 
@@ -274,6 +284,20 @@ class TestNestedSkillMd(TempRepoTest):
 
 
 class TestEvals(TempRepoTest):
+    def report_for_prompt(self, prompt: str):
+        """Validate a skill whose single eval carries prompt."""
+        skill = write_skill(self.tmp)
+        write_evals(skill, minimal_evals(prompt=prompt))
+        return self.run_validate(skill)
+
+    def report_for_files(self, files: object):
+        """Validate a skill whose single eval carries a 'files' value."""
+        skill = write_skill(self.tmp)
+        payload = minimal_evals()
+        payload["evals"][0]["files"] = files
+        write_evals(skill, payload)
+        return self.run_validate(skill)
+
     def test_missing_evals_only_warns(self) -> None:
         skill = write_skill(self.tmp)
         report = self.run_validate(skill)
@@ -326,89 +350,57 @@ class TestEvals(TempRepoTest):
         self.assertNotIn("missing required field 'id'", errors)
 
     def test_missing_fixture_path_is_error(self) -> None:
-        skill = write_skill(self.tmp)
-        write_evals(skill, minimal_evals(prompt="read delegate/evals/fixtures/nope.md please"))
-        self.assertErrorMatching(self.run_validate(skill), "missing path")
+        report = self.report_for_prompt("read delegate/evals/fixtures/nope.md please")
+        self.assertErrorMatching(report, "missing path")
 
     def test_existing_fixture_path_passes(self) -> None:
-        skill = write_skill(self.tmp)
-        fixture = self.tmp / "delegate" / "evals" / "fixtures" / "real.md"
-        fixture.parent.mkdir(parents=True, exist_ok=True)
-        fixture.write_text("hi", encoding="utf-8")
-        write_evals(skill, minimal_evals(prompt="read delegate/evals/fixtures/real.md please"))
-        self.assertTrue(self.run_validate(skill).ok)
+        self.write_fixture("delegate/evals/fixtures/real.md")
+        report = self.report_for_prompt("read delegate/evals/fixtures/real.md please")
+        self.assertTrue(report.ok, report.errors)
 
     def test_trailing_punctuation_is_stripped_from_path(self) -> None:
-        skill = write_skill(self.tmp)
-        fixture = self.tmp / "delegate" / "evals" / "fixtures" / "real.md"
-        fixture.parent.mkdir(parents=True, exist_ok=True)
-        fixture.write_text("hi", encoding="utf-8")
-        write_evals(skill, minimal_evals(prompt="see delegate/evals/fixtures/real.md."))
-        self.assertTrue(self.run_validate(skill).ok)
+        self.write_fixture("delegate/evals/fixtures/real.md")
+        report = self.report_for_prompt("see delegate/evals/fixtures/real.md.")
+        self.assertTrue(report.ok, report.errors)
 
     def test_directory_reference_passes(self) -> None:
-        skill = write_skill(self.tmp)
-        target = self.tmp / "delegate" / "evals" / "fixtures" / "dir"
-        target.mkdir(parents=True)
-        write_evals(skill, minimal_evals(prompt="sweep delegate/evals/fixtures/dir/"))
-        self.assertTrue(self.run_validate(skill).ok)
+        (self.tmp / "delegate" / "evals" / "fixtures" / "dir").mkdir(parents=True)
+        report = self.report_for_prompt("sweep delegate/evals/fixtures/dir/")
+        self.assertTrue(report.ok, report.errors)
 
     def test_url_containing_repo_name_is_not_a_path_reference(self) -> None:
         """github.com/user/claude-delegate/issues/5 is not 'delegate/issues/5'."""
-        skill = write_skill(self.tmp)
-        write_evals(
-            skill,
-            minimal_evals(prompt="see https://github.com/someone/claude-delegate/issues/5"),
-        )
-        self.assertTrue(self.run_validate(skill).ok, self.run_validate(skill).errors)
+        report = self.report_for_prompt("see https://github.com/someone/claude-delegate/issues/5")
+        self.assertTrue(report.ok, report.errors)
 
     def test_nested_path_ending_in_skill_dir_is_not_a_path_reference(self) -> None:
         """out/delegate/summary.md must not be read as delegate/summary.md."""
-        skill = write_skill(self.tmp)
-        write_evals(skill, minimal_evals(prompt="write results to out/delegate/summary.md"))
-        self.assertTrue(self.run_validate(skill).ok, self.run_validate(skill).errors)
+        report = self.report_for_prompt("write results to out/delegate/summary.md")
+        self.assertTrue(report.ok, report.errors)
 
     def test_dotted_prefix_is_not_a_path_reference(self) -> None:
-        skill = write_skill(self.tmp)
-        write_evals(skill, minimal_evals(prompt="module pkg.tests/helper.py is unrelated"))
-        self.assertTrue(self.run_validate(skill).ok, self.run_validate(skill).errors)
+        report = self.report_for_prompt("module pkg.tests/helper.py is unrelated")
+        self.assertTrue(report.ok, report.errors)
 
     def test_real_path_after_punctuation_is_still_checked(self) -> None:
         """The lookbehind must not make the check miss genuine references."""
-        skill = write_skill(self.tmp)
-        write_evals(skill, minimal_evals(prompt="(delegate/evals/fixtures/gone.md)"))
-        self.assertErrorMatching(self.run_validate(skill), "missing path")
+        report = self.report_for_prompt("(delegate/evals/fixtures/gone.md)")
+        self.assertErrorMatching(report, "missing path")
 
     def test_files_list_paths_are_checked(self) -> None:
-        skill = write_skill(self.tmp)
-        payload = minimal_evals()
-        payload["evals"][0]["files"] = ["delegate/evals/fixtures/gone.md"]
-        write_evals(skill, payload)
-        self.assertErrorMatching(self.run_validate(skill), "missing path")
+        report = self.report_for_files(["delegate/evals/fixtures/gone.md"])
+        self.assertErrorMatching(report, "missing path")
 
     def test_files_list_with_existing_path_passes(self) -> None:
-        skill = write_skill(self.tmp)
-        fixture = self.tmp / "delegate" / "evals" / "fixtures" / "real.md"
-        fixture.parent.mkdir(parents=True, exist_ok=True)
-        fixture.write_text("hi", encoding="utf-8")
-        payload = minimal_evals()
-        payload["evals"][0]["files"] = ["delegate/evals/fixtures/real.md"]
-        write_evals(skill, payload)
-        self.assertTrue(self.run_validate(skill).ok)
+        self.write_fixture("delegate/evals/fixtures/real.md")
+        report = self.report_for_files(["delegate/evals/fixtures/real.md"])
+        self.assertTrue(report.ok, report.errors)
 
     def test_files_must_be_a_list(self) -> None:
-        skill = write_skill(self.tmp)
-        payload = minimal_evals()
-        payload["evals"][0]["files"] = "not-a-list"
-        write_evals(skill, payload)
-        self.assertErrorMatching(self.run_validate(skill), "'files' must be a list")
+        self.assertErrorMatching(self.report_for_files("not-a-list"), "'files' must be a list")
 
     def test_files_entries_must_be_strings(self) -> None:
-        skill = write_skill(self.tmp)
-        payload = minimal_evals()
-        payload["evals"][0]["files"] = [42]
-        write_evals(skill, payload)
-        self.assertErrorMatching(self.run_validate(skill), "must be strings")
+        self.assertErrorMatching(self.report_for_files([42]), "must be strings")
 
 
 class TestLeakScan(TempRepoTest):
@@ -418,17 +410,15 @@ class TestLeakScan(TempRepoTest):
         return report
 
     def test_detects_linux_home_path(self) -> None:
-        (self.tmp / "notes.md").write_text("see /home/someone/work/file.md", encoding="utf-8")
+        self.write_fixture("notes.md", "see /home/someone/work/file.md")
         self.assertErrorMatching(self._scan(), "absolute local path")
 
     def test_detects_macos_home_path(self) -> None:
-        (self.tmp / "notes.md").write_text("see /Users/someone/work/file.md", encoding="utf-8")
+        self.write_fixture("notes.md", "see /Users/someone/work/file.md")
         self.assertErrorMatching(self._scan(), "absolute local path")
 
     def test_exempt_token_suppresses(self) -> None:
-        (self.tmp / "notes.md").write_text(
-            "LEAK-CHECK-EXEMPT\nsee /home/someone/x.md", encoding="utf-8"
-        )
+        self.write_fixture("notes.md", "LEAK-CHECK-EXEMPT\nsee /home/someone/x.md")
         self.assertTrue(self._scan().ok)
 
     def test_ignores_binary_and_unknown_suffixes(self) -> None:
@@ -436,22 +426,20 @@ class TestLeakScan(TempRepoTest):
         self.assertTrue(self._scan().ok)
 
     def test_ignores_dist_directory(self) -> None:
-        dist = self.tmp / "dist"
-        dist.mkdir()
-        (dist / "notes.md").write_text("/home/someone/x", encoding="utf-8")
+        self.write_fixture("dist/notes.md", "/home/someone/x")
         self.assertTrue(self._scan().ok)
 
     def test_clean_tree_passes(self) -> None:
-        (self.tmp / "notes.md").write_text("relative/path/is/fine.md", encoding="utf-8")
+        self.write_fixture("notes.md", "relative/path/is/fine.md")
         self.assertTrue(self._scan().ok)
 
     def test_detects_home_path_without_trailing_slash(self) -> None:
         """A bare /home/<name> at end of line is the same leak."""
-        (self.tmp / "notes.md").write_text("export BASE=/home/someone", encoding="utf-8")
+        self.write_fixture("notes.md", "export BASE=/home/someone")
         self.assertErrorMatching(self._scan(), "absolute local path")
 
     def test_detects_macos_home_path_without_trailing_slash(self) -> None:
-        (self.tmp / "notes.json").write_text('{"home": "/Users/someone"}', encoding="utf-8")
+        self.write_fixture("notes.json", '{"home": "/Users/someone"}')
         self.assertErrorMatching(self._scan(), "absolute local path")
 
     def test_validator_source_does_not_exempt_itself(self) -> None:
@@ -465,9 +453,12 @@ class TestLeakScan(TempRepoTest):
 
 
 class TestPackager(TempRepoTest):
-    def package_real(self) -> Path:
-        out = self.tmp / "dist"
-        return package_skill.package(REPO_ROOT / "delegate", out, quiet=True)
+    def package_real(self, out_name: str = "dist") -> Path:
+        return package_skill.package(REAL_SKILL, self.tmp / out_name, quiet=True)
+
+    def archive_names(self, archive: Path | None = None) -> list[str]:
+        with zipfile.ZipFile(archive or self.package_real()) as zf:
+            return zf.namelist()
 
     def test_produces_skill_archive(self) -> None:
         archive = self.package_real()
@@ -475,27 +466,21 @@ class TestPackager(TempRepoTest):
         self.assertEqual("delegate.skill", archive.name)
 
     def test_entries_rooted_at_skill_folder(self) -> None:
-        with zipfile.ZipFile(self.package_real()) as zf:
-            names = zf.namelist()
+        names = self.archive_names()
         self.assertTrue(names)
         for name in names:
             self.assertTrue(name.startswith("delegate/"), name)
 
     def test_contains_exactly_one_skill_md(self) -> None:
-        with zipfile.ZipFile(self.package_real()) as zf:
-            names = zf.namelist()
+        names = self.archive_names()
         self.assertEqual(["delegate/SKILL.md"], [n for n in names if n.endswith("SKILL.md")])
 
     def test_evals_and_fixtures_are_excluded(self) -> None:
-        with zipfile.ZipFile(self.package_real()) as zf:
-            names = zf.namelist()
-        self.assertEqual([], [n for n in names if "evals" in n])
+        self.assertEqual([], [n for n in self.archive_names() if "evals" in n])
 
     def test_archive_is_byte_reproducible(self) -> None:
         first = self.package_real().read_bytes()
-        second = package_skill.package(
-            REPO_ROOT / "delegate", self.tmp / "dist2", quiet=True
-        ).read_bytes()
+        second = self.package_real("dist2").read_bytes()
         self.assertEqual(first, second)
 
     def test_junk_files_are_excluded(self) -> None:
@@ -506,9 +491,7 @@ class TestPackager(TempRepoTest):
         cache.mkdir()
         (cache / "x.py").write_text("junk", encoding="utf-8")
         archive = package_skill.package(skill, self.tmp / "out", quiet=True)
-        with zipfile.ZipFile(archive) as zf:
-            names = zf.namelist()
-        self.assertEqual(["delegate/SKILL.md"], names)
+        self.assertEqual(["delegate/SKILL.md"], self.archive_names(archive))
 
     def test_packaging_fails_on_invalid_skill(self) -> None:
         skill = write_skill(self.tmp, frontmatter="name: delegate")  # no description
@@ -539,15 +522,77 @@ class TestPackager(TempRepoTest):
             package_skill.verify(archive, "delegate")
 
 
+class TestSharedHelpers(TempRepoTest):
+    """The validator and packager must agree on one set of rules."""
+
+    def test_packager_exclusions_match_validator(self) -> None:
+        excluded = [
+            "delegate/evals/evals.json",
+            "delegate/evals/fixtures/skills/toy/SKILL.md",
+            "delegate/__pycache__/x.py",
+            "delegate/references/node_modules/pkg/index.js",
+            "delegate/notes.pyc",
+            "delegate/.DS_Store",
+        ]
+        included = ["delegate/SKILL.md", "delegate/references/deep/guide.md"]
+        for arcname in excluded:
+            self.assertTrue(package_skill.should_exclude(Path(arcname)), arcname)
+            self.assertFalse(skill_common.is_packaged(Path(*Path(arcname).parts[1:])), arcname)
+        for arcname in included:
+            self.assertFalse(package_skill.should_exclude(Path(arcname)), arcname)
+            self.assertTrue(skill_common.is_packaged(Path(*Path(arcname).parts[1:])), arcname)
+
+    def test_nested_evals_directory_is_still_packaged(self) -> None:
+        """Only evals at the skill root is excluded."""
+        self.assertTrue(skill_common.is_packaged(Path("references/evals/notes.md")))
+
+    def test_rel_to_repo_shortens_paths_inside_the_repo(self) -> None:
+        self.assertEqual(
+            Path("delegate/SKILL.md"), skill_common.rel_to_repo(REAL_SKILL / "SKILL.md")
+        )
+
+    def test_rel_to_repo_passes_outside_paths_through(self) -> None:
+        outside = self.tmp / "delegate" / "SKILL.md"
+        self.assertEqual(outside, skill_common.rel_to_repo(outside))
+
+    def test_resolve_skill_dir_rejects_non_directory(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(skill_common.resolve_skill_dir("no-such-skill"))
+        self.assertIn("is not a directory", err.getvalue())
+
+    def test_resolve_skill_dir_returns_absolute_path(self) -> None:
+        self.assertEqual(REAL_SKILL, skill_common.resolve_skill_dir("delegate"))
+
+    def test_both_clis_exit_two_on_a_missing_skill(self) -> None:
+        for main in (validate_skill.main, package_skill.main):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(2, main(["no-such-skill"]), main.__module__)
+
+
 class TestInstaller(TempRepoTest):
     SCRIPT = REPO_ROOT / "install.sh"
 
-    def run_installer(self, *args: str, home: Path | None = None):
+    def run_installer(
+        self,
+        *args: str,
+        home: Path | None = None,
+        raw_home: str | None = None,
+        script: Path | None = None,
+    ):
+        """Run the installer with a controlled HOME.
+
+        `raw_home` sets HOME verbatim (and creates nothing) for the cases that
+        probe an empty or root HOME; otherwise the home directory is created.
+        """
         env = dict(os.environ)
-        env["HOME"] = str(home or self.tmp / "home")
-        Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+        if raw_home is None:
+            home = Path(home or self.tmp / "home")
+            home.mkdir(parents=True, exist_ok=True)
+            env["HOME"] = str(home)
+        else:
+            env["HOME"] = raw_home
         return subprocess.run(
-            [str(self.SCRIPT), *args],
+            [str(script or self.SCRIPT), *args],
             capture_output=True,
             text=True,
             env=env,
@@ -621,36 +666,20 @@ class TestInstaller(TempRepoTest):
         Without the guard, dest becomes /.claude/skills/delegate and the
         installer writes to the filesystem root.
         """
-        env = dict(os.environ)
-        env["HOME"] = ""
-        result = subprocess.run(
-            [str(self.SCRIPT)], capture_output=True, text=True, env=env, cwd=str(self.tmp)
-        )
+        result = self.run_installer(raw_home="")
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("filesystem root", result.stderr)
         self.assertFalse(Path("/.claude/skills/delegate").exists())
 
     def test_root_home_is_refused(self) -> None:
         """HOME=/ strips to '' the same way an empty HOME does."""
-        env = dict(os.environ)
-        env["HOME"] = "/"
-        result = subprocess.run(
-            [str(self.SCRIPT)], capture_output=True, text=True, env=env, cwd=str(self.tmp)
-        )
+        result = self.run_installer(raw_home="/")
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("filesystem root", result.stderr)
 
     def test_empty_home_uninstall_is_refused(self) -> None:
         """The guard must run before --uninstall, which would rm -rf the root path."""
-        env = dict(os.environ)
-        env["HOME"] = ""
-        result = subprocess.run(
-            [str(self.SCRIPT), "--uninstall"],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(self.tmp),
-        )
+        result = self.run_installer("--uninstall", raw_home="")
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn("filesystem root", result.stderr)
 
@@ -664,12 +693,7 @@ class TestInstaller(TempRepoTest):
         link = self.tmp / "install-link.sh"
         link.symlink_to(self.SCRIPT)
         home = self.tmp / "home"
-        env = dict(os.environ)
-        env["HOME"] = str(home)
-        home.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [str(link)], capture_output=True, text=True, env=env, cwd=str(self.tmp)
-        )
+        result = self.run_installer(home=home, script=link)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertTrue(self.installed_path(home).is_file())
 
@@ -677,7 +701,7 @@ class TestInstaller(TempRepoTest):
         home = self.tmp / "home"
         self.run_installer(home=home)
         self.assertEqual(
-            (REPO_ROOT / "delegate" / "SKILL.md").read_text(encoding="utf-8"),
+            (REAL_SKILL / "SKILL.md").read_text(encoding="utf-8"),
             self.installed_path(home).read_text(encoding="utf-8"),
         )
 
