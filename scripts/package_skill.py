@@ -71,13 +71,22 @@ def package(skill_dir: Path, out_dir: Path, *, quiet: bool = False) -> Path:
 
     members: list[tuple[Path, Path]] = []
     for path in sorted(skill_dir.rglob("*")):
-        if not path.is_file():
+        if not path.is_symlink() and not path.is_file():
             continue
         arcname = path.relative_to(skill_dir.parent)
         if should_exclude(arcname):
             if not quiet:
                 print(f"  skipped: {arcname}")
             continue
+        # A symlink under the skill root would be followed and its *target's*
+        # bytes embedded in a shareable archive — an easy way to ship a host
+        # file (an .ssh key, an .env) to whoever installs the skill. Refuse
+        # rather than silently drop it, so the omission is never a surprise.
+        if path.is_symlink():
+            raise ValueError(
+                f"{arcname} is a symlink; refusing to package (it would embed the "
+                "target's contents). Replace it with a regular file or remove it."
+            )
         members.append((path, arcname))
 
     if not members:

@@ -6,13 +6,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only GITHUB_TOKEN: nothing here writes to the repo, and the default
+# permissions depend on org/repo settings rather than on this file.
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to commit SHAs: a mutable tag like @v4 lets an
+      # upstream retag change what runs in CI.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
