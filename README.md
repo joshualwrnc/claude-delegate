@@ -106,14 +106,14 @@ Two layers. Structural checks run in CI on every push; behavioral evals are run 
 ```bash
 python3 scripts/validate_skill.py              # structural
 python3 scripts/validate_skill.py --for-upload # stricter: Skills API rules
-python3 -m unittest discover -s tests -v       # 65 tests
+python3 -m unittest discover -s tests -v       # 82 tests
 ```
 
 `scripts/validate_skill.py` is stdlib-only. It verifies the frontmatter parses, `name` is kebab-case and matches its directory, `description` is within 1024 chars and free of angle brackets (the Skills API rejects those), `compatibility` is within 500 chars, and that the skill has exactly one *packaged* `SKILL.md`. `--for-upload` additionally rejects keys that Claude Code accepts locally but the Skills API does not, so a package can't be built that is guaranteed to fail on upload.
 
-It also enforces two things about the eval suite that matter more than they sound: **every fixture path referenced by an eval must exist**, and **no absolute `/home/...` or `/Users/...` path may appear in a tracked file**. An eval pointing at a missing file silently tests nothing, and a local absolute path makes the suite unrunnable for everyone else. Both of those were real defects in the first draft, caught by these checks.
+It also enforces two things about the eval suite that matter more than they sound: **every fixture path referenced by an eval must exist** (in its `prompt` and its `files` list), and **no absolute home path — `/home/<user>/`, `/Users/<user>/` — may appear in a tracked file**. An eval pointing at a missing file silently tests nothing, and a local absolute path makes the suite unrunnable for everyone else. Both of those were real defects in the first draft, caught by these checks. A file whose job is to *test* the leak scan opts out with a marker token.
 
-`tests/test_repo.py` covers the validator (each rule, positive and negative), the packager (exactly one `SKILL.md`, `evals/` excluded, entries rooted at the skill folder, byte-reproducibility, rejection of tampered archives), and `install.sh` end to end against throwaway `HOME`s. CI additionally rebuilds `dist/delegate.skill` and fails if it differs from the committed copy — the archive is byte-reproducible, so any diff means the artifact is stale.
+`tests/test_repo.py` (82 tests) covers the validator (each rule, positive and negative), the packager (exactly one `SKILL.md`, `evals/` excluded, entries rooted at the skill folder, byte-reproducibility, rejection of tampered archives), and `install.sh` end to end against throwaway `HOME`s. CI additionally rebuilds `dist/delegate.skill` and fails if it differs from the committed copy — the archive is byte-reproducible, so any diff means the artifact is stale.
 
 ### Behavioral evals
 
@@ -152,7 +152,7 @@ scripts/
   validate_skill.py         structural + hygiene validator (CI entry point)
   package_skill.py          builds dist/delegate.skill, reproducibly
 tests/
-  test_repo.py              65 tests over validator, packager, installer
+  test_repo.py              82 tests over validator, packager, installer
 dist/
   delegate.skill            prebuilt, uploadable package
 install.sh                  personal / project install and uninstall

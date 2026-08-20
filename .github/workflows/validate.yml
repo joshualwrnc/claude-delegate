@@ -26,10 +26,17 @@ jobs:
       - name: Run tests
         run: python3 -m unittest discover -s tests -v
 
-      - name: Check installer is executable and syntactically valid
+      # Runtime behavior is covered by TestInstaller in the suite above; these
+      # catch syntax and quoting problems on paths the tests do not reach.
+      - name: Lint installer
         run: |
           test -x install.sh || { echo "install.sh is not executable"; exit 1; }
           bash -n install.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck install.sh
+          else
+            echo "shellcheck unavailable on this runner, skipped"
+          fi
 
       # The archive is byte-reproducible, so rebuilding must be a no-op.
       # A diff here means the committed .skill is stale relative to SKILL.md.

@@ -3,6 +3,45 @@
 All notable changes to this skill are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] — 2026-08-20
+
+Fixes from a scaffolding review. No change to skill behavior; `SKILL.md` and
+`dist/delegate.skill` are byte-identical to 0.2.0.
+
+### Fixed
+
+- **`install.sh` could write to the filesystem root.** `set -u` catches an
+  *unset* `HOME` but not an empty one, and `"${HOME%/}"` also yields `""` when
+  `HOME=/`. Either way the destination became `/.claude/skills/delegate`, and
+  `--uninstall` in that state would `rm -rf` it. The guard now runs before any
+  branch uses the destination, including `--uninstall`.
+- `install.sh --project PATH` silently `mkdir -p`'d a typo'd path and reported
+  success; it now fails if the path is not an existing directory.
+- `install.sh` mis-resolved its own location when invoked through a symlink,
+  reporting "run this from a clone of the repo" from inside a clone.
+- **Validator false positive:** the repo-path regex matched mid-string, so an
+  eval prompt containing this repo's own GitHub URL
+  (`.../claude-delegate/issues/5`) or any nested path (`out/delegate/x.md`)
+  failed CI for a path nobody claimed existed. Added a lookbehind.
+- **Validator false negative:** the leaked-path regex required a trailing
+  slash, so a bare `/home/<name>` at end of line — exactly the leak class the
+  check exists for — was never flagged.
+- **The validator was exempting itself from the leak scan.** It defines the
+  opt-out token, so its own source contained it. The constant is now split so
+  the contiguous token never appears in that file.
+- `Report.render()` took `sys.stdout`/`sys.stderr` as default arguments, which
+  Python binds once at definition time, so callers redirecting output were
+  silently ignored.
+- Eval `files` lists are now validated: type-checked, and any repo-relative
+  path in them must exist. Previously only `prompt` text was scanned.
+
+### Added
+
+- 17 more tests (82 total) covering every fix above, including the
+  empty-`HOME` guard and the two regex defects — a regression in any of them
+  would previously have passed CI silently.
+- `shellcheck` on `install.sh` in CI, where available.
+
 ## [0.2.0] — 2026-08-20
 
 Hardening pass driven by an adversarial review of `SKILL.md` and two

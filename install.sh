@@ -12,7 +12,10 @@
 
 set -euo pipefail
 
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/delegate"
+# Resolve symlinks so invoking this via a symlinked path still finds the skill.
+# readlink -f is GNU; fall back to the raw path where it is unavailable.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+SRC="$(cd "$(dirname "$SELF")" && pwd)/delegate"
 SKILL_NAME="delegate"
 
 scope="personal"
@@ -27,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       if [[ ${2-} && ${2-} != --* ]]; then
         target_root="$2"
         shift
+        if [[ ! -d "$target_root" ]]; then
+          echo "error: --project path '$target_root' is not a directory" >&2
+          exit 1
+        fi
       else
         target_root="$(pwd)"
       fi
@@ -46,7 +53,17 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-dest="${target_root%/}/.claude/skills/${SKILL_NAME}"
+# `set -u` catches an *unset* HOME but not an empty one, and stripping the
+# trailing slash off "/" also yields "". Either way dest would become
+# /.claude/skills/delegate — writing to, or rm -rf'ing, the filesystem root.
+# Check before dest is used by any branch below, including --uninstall.
+target_root="${target_root%/}"
+if [[ -z "$target_root" ]]; then
+  echo "error: refusing to operate on the filesystem root — HOME or --project is empty or '/'" >&2
+  exit 1
+fi
+
+dest="${target_root}/.claude/skills/${SKILL_NAME}"
 
 if [[ $uninstall -eq 1 ]]; then
   if [[ -e "$dest" ]]; then

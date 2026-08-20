@@ -60,16 +60,22 @@ LOCAL_ONLY_KEYS = {"disable-model-invocation"}
 EXCLUDED_DIR_PARTS = {"__pycache__", "node_modules"}
 ROOT_EXCLUDED_DIR_PARTS = {"evals"}
 
-REPO_PATH_RE = re.compile(r"\b(?:delegate|scripts|tests)/[A-Za-z0-9._/-]+")
+# Repo-relative path references inside eval prompts. The leading lookbehind
+# stops a match mid-path or mid-URL: without it, "github.com/user/claude-delegate/
+# issues/5" yields the bogus candidate "delegate/issues/5", and "out/delegate/x.md"
+# yields "delegate/x.md" — both failing CI for paths nobody claimed exist.
+REPO_PATH_RE = re.compile(r"(?<![\w/.:-])(?:delegate|scripts|tests)/[A-Za-z0-9._/-]+")
 
 # An absolute home path in a tracked file almost always means someone's local
 # workspace leaked into the repo — which also makes the eval suite unrunnable
-# for anyone else. Caught exactly that in this suite's first draft.
-HOME_PATH_RE = re.compile(r"(?:/home/|/Users/)[A-Za-z0-9._-]+/")
+# for anyone else. Caught exactly that in this suite's first draft. No trailing
+# slash is required: a bare "/home/<name>" at end of line is the same leak.
+HOME_PATH_RE = re.compile(r"(?:/home/|/Users/)[A-Za-z0-9._-]+")
 
 # A file containing this token is skipped by the leaked-path scan. Only for
-# files whose job is to *test* the scan.
-LEAK_EXEMPT_TOKEN = "LEAK-CHECK-EXEMPT"  # noqa: S105 - not a credential
+# files whose job is to *test* the scan. Split so that this file does not
+# contain the contiguous token and therefore does not exempt itself.
+LEAK_EXEMPT_TOKEN = "LEAK-CHECK-" "EXEMPT"  # noqa: S105,ISC001 - not a credential
 
 TEXT_SUFFIXES = {".md", ".json", ".yml", ".yaml", ".py", ".sh", ".txt"}
 
@@ -95,7 +101,12 @@ class Report:
     def ok(self) -> bool:
         return not self.errors
 
-    def render(self, stream_out=sys.stdout, stream_err=sys.stderr) -> None:
+    def render(self, stream_out=None, stream_err=None) -> None:
+        # Resolved at call time, not as default arguments: Python binds
+        # defaults once at definition, which would capture the original
+        # streams and silently ignore any later redirect.
+        stream_out = sys.stdout if stream_out is None else stream_out
+        stream_err = sys.stderr if stream_err is None else stream_err
         for message in self.warnings:
             print(f"warning: {message}", file=stream_out)
         for message in self.errors:
@@ -232,6 +243,16 @@ def check_skill(skill_dir: Path, report: Report, *, for_upload: bool) -> None:
         report.warn(f"{rel}: body has no top-level '# ' heading")
 
 
+def check_referenced_paths(text: str, label: str, report: Report, repo_root: Path) -> None:
+    """Flag repo-relative paths in text that do not exist on disk."""
+    for match in REPO_PATH_RE.findall(text):
+        # Only '.' can trail a match, since the character class excludes the
+        # other sentence punctuation.
+        candidate = match.rstrip(".")
+        if not (repo_root / candidate).exists():
+            report.error(f"{label}: references missing path {candidate!r}")
+
+
 def check_evals(skill_dir: Path, report: Report, repo_root: Path) -> None:
     evals_path = skill_dir / "evals" / "evals.json"
     try:
@@ -279,10 +300,19 @@ def check_evals(skill_dir: Path, report: Report, repo_root: Path) -> None:
 
         # Every fixture a prompt points at must actually exist, otherwise the
         # eval silently tests nothing.
-        for match in REPO_PATH_RE.findall(str(case.get("prompt", ""))):
-            candidate = match.rstrip(".,;:!?)\"'")
-            if not (repo_root / candidate).exists():
-                report.error(f"{label}: prompt references missing path {candidate!r}")
+        check_referenced_paths(str(case.get("prompt", "")), f"{label}: prompt", report, repo_root)
+
+        # `files` is a list of attachments the harness feeds the run. Typos
+        # there are as silent as typos in the prompt.
+        files = case.get("files", [])
+        if not isinstance(files, list):
+            report.error(f"{label}: 'files' must be a list")
+        else:
+            for entry in files:
+                if not isinstance(entry, str):
+                    report.error(f"{label}: 'files' entries must be strings, got {entry!r}")
+                    continue
+                check_referenced_paths(entry, f"{label}: files", report, repo_root)
 
 
 def check_no_leaked_paths(report: Report, repo_root: Path) -> None:
