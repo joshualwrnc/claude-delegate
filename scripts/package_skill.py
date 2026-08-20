@@ -21,20 +21,21 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-import fnmatch
 import sys
 import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from validate_skill import REPO_ROOT, validate  # noqa: E402
-
-EXCLUDE_DIRS = {"__pycache__", "node_modules"}
-ROOT_EXCLUDE_DIRS = {"evals"}
-EXCLUDE_GLOBS = {"*.pyc"}
-EXCLUDE_FILES = {".DS_Store"}
+from skill_common import (  # noqa: E402
+    REPO_ROOT,
+    SKILL_FILENAME,
+    build_parser,
+    is_packaged,
+    rel_to_repo,
+    resolve_skill_dir,
+)
+from validate_skill import validate  # noqa: E402
 
 # Fixed timestamp for reproducible archives (zip epoch starts at 1980).
 FIXED_DATE_TIME = (1980, 1, 1, 0, 0, 0)
@@ -42,22 +43,16 @@ FIXED_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 
 def should_exclude(arcname: Path) -> bool:
     """Decide exclusion from an arcname rooted at the skill folder name."""
-    parts = arcname.parts
-    if any(part in EXCLUDE_DIRS for part in parts):
-        return True
-    # parts[0] is the skill folder; parts[1] is its first subdirectory.
-    if len(parts) > 1 and parts[1] in ROOT_EXCLUDE_DIRS:
-        return True
-    if arcname.name in EXCLUDE_FILES:
-        return True
-    return any(fnmatch.fnmatch(arcname.name, pattern) for pattern in EXCLUDE_GLOBS)
+    # The shared rule is expressed relative to the skill root, so drop the
+    # leading skill-folder component the archive adds.
+    return not is_packaged(Path(*arcname.parts[1:]))
 
 
 def package(skill_dir: Path, out_dir: Path, *, quiet: bool = False) -> Path:
     """Package skill_dir into out_dir/<name>.skill. Returns the archive path."""
     skill_dir = skill_dir.resolve()
-    if not (skill_dir / "SKILL.md").is_file():
-        raise FileNotFoundError(f"{skill_dir}/SKILL.md not found")
+    if not (skill_dir / SKILL_FILENAME).is_file():
+        raise FileNotFoundError(f"{skill_dir}/{SKILL_FILENAME} not found")
 
     # Package only what would survive upload — catch problems here rather than
     # shipping an artifact guaranteed to be rejected.
@@ -109,13 +104,14 @@ def verify(archive: Path, skill_name: str) -> None:
     if stray:
         raise ValueError(f"{archive.name}: entries outside {expected_root}: {stray}")
 
-    if f"{skill_name}/SKILL.md" not in names:
-        raise ValueError(f"{archive.name}: missing {skill_name}/SKILL.md")
+    if f"{skill_name}/{SKILL_FILENAME}" not in names:
+        raise ValueError(f"{archive.name}: missing {skill_name}/{SKILL_FILENAME}")
 
-    skill_mds = [n for n in names if n.endswith("SKILL.md")]
+    skill_mds = [n for n in names if n.endswith(SKILL_FILENAME)]
     if len(skill_mds) != 1:
         raise ValueError(
-            f"{archive.name}: expected exactly one SKILL.md, found {len(skill_mds)}: {skill_mds}"
+            f"{archive.name}: expected exactly one {SKILL_FILENAME}, "
+            f"found {len(skill_mds)}: {skill_mds}"
         )
 
     leaked = [n for n in names if "/evals/" in f"/{n}"]
@@ -124,18 +120,15 @@ def verify(archive: Path, skill_name: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("skill", nargs="?", default="delegate", help="skill directory")
+    parser = build_parser(__doc__)
     parser.add_argument("--out-dir", default="dist", help="output directory (default: dist)")
     parser.add_argument("--quiet", action="store_true", help="only print the result path")
     args = parser.parse_args(argv)
 
-    skill_dir = (REPO_ROOT / args.skill).resolve()
-    out_dir = (REPO_ROOT / args.out_dir).resolve()
-
-    if not skill_dir.is_dir():
-        print(f"error: {skill_dir} is not a directory", file=sys.stderr)
+    skill_dir = resolve_skill_dir(args.skill)
+    if skill_dir is None:
         return 2
+    out_dir = (REPO_ROOT / args.out_dir).resolve()
 
     try:
         archive = package(skill_dir, out_dir, quiet=args.quiet)
@@ -144,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     size = archive.stat().st_size
-    print(f"\npackaged {archive.relative_to(REPO_ROOT)} ({size:,} bytes)")
+    print(f"\npackaged {rel_to_repo(archive)} ({size:,} bytes)")
     print("Upload it at claude.ai -> Settings -> Capabilities -> Skills.")
     return 0
 
