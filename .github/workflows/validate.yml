@@ -1,0 +1,26 @@
+name: validate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Standard library only — no install step needed.
+      - name: Validate skill and eval suite
+        run: python3 scripts/validate_skill.py
+
+      - name: Check installer is executable and syntactically valid
+        run: |
+          test -x install.sh || { echo "install.sh is not executable"; exit 1; }
+          bash -n install.sh

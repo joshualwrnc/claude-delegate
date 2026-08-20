@@ -1,0 +1,48 @@
+{
+  "skill_name": "delegate",
+  "notes": "Paths in prompts are relative to the repository root; run the eval harness from there. Fixtures live in delegate/evals/fixtures/ and are self-contained.",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "divisible-brand-audit",
+      "prompt": "I need a comparison of our three brands' guides. Read delegate/evals/fixtures/brands/aurora/brand-guide.md, delegate/evals/fixtures/brands/beacon/brand-guide.md, and delegate/evals/fixtures/brands/cirrus/brand-guide.md and produce one comparison table covering: voice rules, 'never' rules, and target audience. This feels splittable — handle it efficiently. Keep the current model as orchestrator if that comes up.",
+      "expected_output": "A delegation plan first (three parallel cheap sub-agents, one per brand guide, mapped to haiku/sonnet with explicit model params), then an integrated comparison table synthesized by the orchestrator, plus a short cost/time accounting.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "eval_name": "explicit-cheap-fanout",
+      "prompt": "delegate this cheaply: for every skill folder in delegate/evals/fixtures/skills/, give me a one-line plain-english summary of what each skill does. I'm keeping the current model as orchestrator, no need to ask.",
+      "expected_output": "Skips the orchestrator question (user already answered), plans a parallel fan-out to haiku-tier agents with explicit model params, returns one line per skill covering all four skill folders, reviewed/integrated by the orchestrator.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "eval_name": "too-small-to-delegate",
+      "prompt": "can you delegate this to a cheap sub-agent: tell me what the first heading in delegate/evals/fixtures/README.md says",
+      "expected_output": "Recognizes the task is a single trivial step where spawning an agent costs more than doing it inline; declines to delegate, answers directly (\"Sample Workspace\"), and briefly explains why delegation wasn't worth it.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "eval_name": "dependent-waves",
+      "prompt": "delegate: first inventory every 'never' rule across the three brand guides in delegate/evals/fixtures/brands/ (aurora, beacon, cirrus), THEN write one cross-brand 'shared floor' summary paragraph that only uses rules appearing in all three. Current model orchestrates.",
+      "expected_output": "Plan shows wave 1 (parallel per-brand extraction, cheap tier) and wave 2 (synthesis) explicitly dependent on wave 1's output — synthesis must not start or be delegated before extractions return. The final paragraph contains only the two rules common to all three guides (no uncitable performance/safety claims; no ALL-CAPS emphasis) and excludes brand-specific rules.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "eval_name": "escalation-after-failed-review",
+      "prompt": "delegate cheaply: read delegate/evals/fixtures/confidence-tags.md and explain the exact statistical logic behind its confidence tags, including any edge cases where a tag should be downgraded. Current model orchestrates.",
+      "expected_output": "If a cheap-tier agent's answer fails review (vague, wrong, or missing edge cases — e.g. missing that downgrades stack, that ladder is evaluated before downgrades, or that a post-hoc segment is a hard cap rather than a step), the orchestrator re-delegates one tier up or pulls it inline after at most two failures, and notes the escalation in the final report — no third retry at the same tier.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "eval_name": "asks-orchestrator-question",
+      "prompt": "use the delegate skill: summarize what each of the platform files in delegate/evals/fixtures/platforms/ covers.",
+      "expected_output": "Because the user never said who should orchestrate, the run presents the three Step-0 options (current model / cheaper via /model / no delegation) with brief descriptions before executing, rather than silently proceeding.",
+      "files": []
+    }
+  ]
+}
