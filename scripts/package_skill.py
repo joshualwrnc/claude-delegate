@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -70,9 +71,7 @@ def package(skill_dir: Path, out_dir: Path, *, quiet: bool = False) -> Path:
     archive = out_dir / f"{skill_dir.name}.skill"
 
     members: list[tuple[Path, Path]] = []
-    for path in sorted(skill_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in sorted(collect_files(skill_dir)):
         arcname = path.relative_to(skill_dir.parent)
         if should_exclude(arcname):
             if not quiet:
@@ -83,44 +82,76 @@ def package(skill_dir: Path, out_dir: Path, *, quiet: bool = False) -> Path:
     if not members:
         raise ValueError("nothing to package")
 
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path, arcname in members:
-            info = zipfile.ZipInfo(str(arcname), date_time=FIXED_DATE_TIME)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            zf.writestr(info, path.read_bytes())
-            if not quiet:
-                print(f"  added:   {arcname}")
+    # Build beside the target and swap in only once verify() passes, so a
+    # failure never leaves a half-written or invalid .skill where the previous
+    # good one was — an artifact that would otherwise be uploaded or committed.
+    staged = archive.with_name(f"{archive.name}.tmp")
+    try:
+        with zipfile.ZipFile(staged, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path, arcname in members:
+                info = zipfile.ZipInfo(str(arcname), date_time=FIXED_DATE_TIME)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                zf.writestr(info, path.read_bytes())
+                if not quiet:
+                    print(f"  added:   {arcname}")
 
-    verify(archive, skill_dir.name)
+        verify(staged, skill_dir.name, label=archive.name)
+        os.replace(staged, archive)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+
     return archive
 
 
-def verify(archive: Path, skill_name: str) -> None:
-    """Re-open the archive and assert the invariants upload depends on."""
+def collect_files(skill_dir: Path) -> list[Path]:
+    """List every file under skill_dir, failing loudly on an unwalkable dir.
+
+    Path.rglob swallows permission errors, which would silently ship a .skill
+    missing whatever lived in the directory that could not be read.
+    """
+
+    def on_error(exc: OSError) -> None:
+        raise exc
+
+    files: list[Path] = []
+    for dirpath, _dirnames, filenames in os.walk(skill_dir, onerror=on_error):
+        for filename in filenames:
+            files.append(Path(dirpath) / filename)
+    return files
+
+
+def verify(archive: Path, skill_name: str, *, label: str | None = None) -> None:
+    """Re-open the archive and assert the invariants upload depends on.
+
+    label names the archive in messages, so a staged file can be verified
+    while errors still point at the path the caller asked for.
+    """
+    name = label or archive.name
     with zipfile.ZipFile(archive) as zf:
         bad = zf.testzip()
         if bad is not None:
-            raise ValueError(f"{archive.name}: corrupt entry {bad}")
+            raise ValueError(f"{name}: corrupt entry {bad}")
         names = zf.namelist()
 
     expected_root = f"{skill_name}/"
     stray = [n for n in names if not n.startswith(expected_root)]
     if stray:
-        raise ValueError(f"{archive.name}: entries outside {expected_root}: {stray}")
+        raise ValueError(f"{name}: entries outside {expected_root}: {stray}")
 
     if f"{skill_name}/SKILL.md" not in names:
-        raise ValueError(f"{archive.name}: missing {skill_name}/SKILL.md")
+        raise ValueError(f"{name}: missing {skill_name}/SKILL.md")
 
     skill_mds = [n for n in names if n.endswith("SKILL.md")]
     if len(skill_mds) != 1:
         raise ValueError(
-            f"{archive.name}: expected exactly one SKILL.md, found {len(skill_mds)}: {skill_mds}"
+            f"{name}: expected exactly one SKILL.md, found {len(skill_mds)}: {skill_mds}"
         )
 
     leaked = [n for n in names if "/evals/" in f"/{n}"]
     if leaked:
-        raise ValueError(f"{archive.name}: evals must not be packaged: {leaked}")
+        raise ValueError(f"{name}: evals must not be packaged: {leaked}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,12 +170,17 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         archive = package(skill_dir, out_dir, quiet=args.quiet)
-    except (FileNotFoundError, ValueError) as exc:
+        size = archive.stat().st_size
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    size = archive.stat().st_size
-    print(f"\npackaged {archive.relative_to(REPO_ROOT)} ({size:,} bytes)")
+    try:
+        shown = archive.relative_to(REPO_ROOT)
+    except ValueError:
+        shown = archive
+
+    print(f"\npackaged {shown} ({size:,} bytes)")
     print("Upload it at claude.ai -> Settings -> Capabilities -> Skills.")
     return 0
 

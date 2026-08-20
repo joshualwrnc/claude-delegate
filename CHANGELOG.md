@@ -3,6 +3,40 @@
 All notable changes to this skill are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] — 2026-08-20
+
+Error-handling review of the scaffolding. No change to skill behavior;
+`SKILL.md` and `dist/delegate.skill` are byte-identical to 0.2.1.
+
+### Fixed
+
+- **The leak scan silently skipped files it could not read.** `except
+  (UnicodeDecodeError, OSError): continue` meant an unreadable or non-UTF-8
+  tracked file was never scanned and the check still reported success. Both
+  are now errors.
+- **`Path.rglob` swallows permission errors**, so a directory the validator
+  could not read made the leak scan and the packaged-`SKILL.md` count pass by
+  simply not seeing its files. Walking now reports unreadable directories as
+  errors, and the packager raises rather than shipping a `.skill` missing them.
+- Unreadable or non-UTF-8 `SKILL.md`/`evals.json` crashed with a traceback
+  instead of being reported through the normal report.
+- **A failed packaging run could leave a bad `dist/delegate.skill` in place.**
+  The archive was written directly to its final path and only verified
+  afterwards, so a failed `verify()` or an I/O error left a half-written or
+  invalid artifact where the previous good one was. The archive is now staged
+  and swapped in only after verification passes.
+- `package_skill.py` crashed with a traceback on `OSError`,
+  `zipfile.BadZipFile`, and on `--out-dir` outside the repo; these now exit 1
+  with a message.
+- **`install.sh` deleted the existing install before copying the new one**, so
+  a failed `cp` left an empty skill directory for Claude Code to load. The new
+  copy is staged next to the destination and moved into place last.
+
+### Added
+
+- 7 more tests (89 total) covering the unreadable-input paths, the atomic
+  packaging swap, and a failed installer copy leaving the prior install intact.
+
 ## [0.2.1] — 2026-08-20
 
 Fixes from a scaffolding review. No change to skill behavior; `SKILL.md` and
